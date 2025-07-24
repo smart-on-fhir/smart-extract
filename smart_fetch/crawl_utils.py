@@ -9,12 +9,14 @@ from functools import partial
 
 import cumulus_fhir_support as cfs
 import httpx
+import rich
 
 from smart_fetch import (
     bulk_utils,
     filtering,
     iter_utils,
     lifecycle,
+    merges,
     ndjson,
     resources,
     timing,
@@ -53,6 +55,7 @@ async def perform_crawl(
     mrn_file: str | None,
     mrn_system: str | None,
     finish_callback: Callable[[str], Awaitable[None]] | None = None,
+    managed_dir: str | None = None,
 ) -> None:
     if group_nickname:
         group_name = group_nickname
@@ -87,11 +90,21 @@ async def perform_crawl(
     # transaction time for the exported data set.
     transaction_times: dict[str, datetime.datetime] = {}
 
+    processor_finish = partial(
+        finish_wrapper,
+        metadata,
+        finish_callback,
+        transaction_times,
+        workdir,
+        managed_dir,
+        filters,
+    )
+
     processor = iter_utils.ResourceProcessor(
         workdir,
         "Crawling",
         callback=partial(process_resource, rest_client, id_pool, workdir, transaction_times),
-        finish_callback=partial(finish_wrapper, metadata, finish_callback, transaction_times),
+        finish_callback=processor_finish,
         append=False,
     )
 
@@ -113,7 +126,7 @@ async def perform_crawl(
                 fhir_url=fhir_url,
                 group=group,
                 metadata=metadata,
-                finish_callback=finish_callback,
+                finish_callback=processor_finish,
             )
         del filter_params[resources.PATIENT]
         patient_ids = read_patient_ids(workdir)
@@ -132,9 +145,10 @@ async def perform_crawl(
             if finish_callback:
                 await finish_callback(res_type)
             continue
+
         processor.add_source(
             res_type,
-            resource_urls(res_type, "patient=", patient_ids, filter_params),
+            resource_urls_with_new_patients(res_type, metadata, managed_dir, patient_ids, filters),
             len(patient_ids),
         )
 
@@ -156,7 +170,7 @@ async def gather_patients(
     fhir_url: str,
     group: str,
     metadata: lifecycle.OutputMetadata,
-    finish_callback: Callable[[str], Awaitable[None]] | None = None,
+    finish_callback: Callable[[str], Awaitable[None]],
 ) -> None:
     if mrn_file and mrn_system:
         with open(mrn_file, encoding="utf8", newline="") as f:
@@ -191,23 +205,30 @@ async def gather_patients(
                 metadata=metadata,
             )
             await exporter.export()
-            await finish_wrapper(
-                metadata,
-                finish_callback,
-                {},
-                resources.PATIENT,
-                timestamp=exporter.transaction_time,
-            )
+            await finish_callback(resources.PATIENT, timestamp=exporter.transaction_time)
 
 
 async def finish_wrapper(
     metadata: lifecycle.OutputMetadata,
     custom_finish: Callable[[str], Awaitable[None]] | None,
     transaction_times: dict[str, datetime.datetime],
+    workdir: str,
+    managed_dir: str,
+    filters: filtering.Filters,
     res_type: str,
     *,
     timestamp: datetime.datetime,
 ) -> None:
+    # Calculate new/deleted patients, if possible
+    if res_type == resources.PATIENT:
+        new, deleted = merges.find_new_patients(workdir, managed_dir, filters)
+        if new:
+            metadata.note_new_patients(new)
+            rich.print(f"Count of new patients: {len(new):,}.")
+        if deleted:
+            _save_deleted_patients(workdir, deleted)
+            rich.print(f"Count of deleted patients: {len(deleted):,}")
+
     # If `timestamp` (which is when we started crawling) is earlier than our latest found date,
     # use it as our transaction time instead (this way we ensure we don't miss any resources that
     # got created during our crawl, at the cost of getting some duplicate resources next time we
@@ -226,11 +247,33 @@ def read_patient_ids(folder: str) -> set[str]:
     }
 
 
-async def resource_urls(res_type, query_prefix, ids, filters) -> AsyncIterable[str]:
+async def resource_urls_with_new_patients(
+    res_type: str,
+    metadata: lifecycle.OutputMetadata,
+    managed_dir: str | None,
+    patient_ids: set[str],
+    filters: filtering.Filters,
+) -> AsyncIterable[str]:
+    if filters.since:
+        new_ids = merges.find_new_patients_for_resource(res_type, metadata, managed_dir, filters)
+    else:
+        # Not necessary to care about new IDs - we are getting the historical data anyway
+        new_ids = set()
+
+    existing_ids = patient_ids - new_ids
+    new_ids &= patient_ids
+
+    async for url in resource_urls(res_type, "patient=", existing_ids, filters.params()):
+        yield url
+    async for url in resource_urls(res_type, "patient=", new_ids, filters.params(with_since=False)):
+        yield url
+
+
+async def resource_urls(res_type, query_prefix, ids, params) -> AsyncIterable[str]:
     for one_id in ids:
         url = f"{res_type}?{query_prefix}{one_id}"
 
-        if res_filters := filters.get(res_type):
+        if res_filters := params.get(res_type):
             for res_filter in res_filters:
                 yield f"{url}&{res_filter}"
         else:
@@ -315,3 +358,22 @@ async def process_resource(
         update_transaction_time(transaction_times, res_type, resources.get_created_date(resource))
 
         writer.write(resource)
+
+
+def _save_deleted_patients(workdir: str, patient_ids: set[str]) -> None:
+    deleted_dir = os.path.join(workdir, "deleted")
+    os.makedirs(deleted_dir, exist_ok=True)
+
+    patient_file = os.path.join(deleted_dir, f"{resources.PATIENT}.ndjson.gz")
+    with ndjson.NdjsonWriter(patient_file) as writer:
+        # Write a new bundle for each patient - this is mildly wasteful of space, but it makes
+        # it easier to read/grep and most importantly, get a quick count of deleted patients by
+        # just checking how many lines are in the file.
+        for patient_id in patient_ids:
+            writer.write(
+                {
+                    "resourceType": resources.BUNDLE,
+                    "type": "transaction",
+                    "entry": [{"request": {"method": "DELETE", "url": f"Patient/{patient_id}"}}],
+                }
+            )

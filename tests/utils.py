@@ -72,7 +72,7 @@ class TestCase(unittest.IsolatedAsyncioTestCase):
 
     def set_resource_route(self, callback):
         route = self.server.get(
-            url__regex=rf"{self.url}/(?P<res_type>[^/]+)/(?P<res_id>[^/?]+)[^/\$]*$"
+            url__regex=rf"{self.url}/(?P<res_type>[^/]+)/(?P<res_id>[^$/?]+)[^/\$]*$"
         )
         route.side_effect = callback
 
@@ -105,7 +105,7 @@ class TestCase(unittest.IsolatedAsyncioTestCase):
         return all_params
 
     def set_resource_search_route(self, callback):
-        route = self.server.get(url__regex=rf"{self.url}/(?P<res_type>[^/?]+)[^/\$]*$")
+        route = self.server.get(url__regex=rf"{self.url}/(?P<res_type>[^$/?]+)[^/\$]*$")
         route.side_effect = callback
 
     async def cli(self, *args) -> None:

@@ -19,7 +19,7 @@ import rich.live
 import rich.text
 
 import smart_fetch
-from smart_fetch import cli_utils, filtering, lifecycle, ndjson, resources, timing
+from smart_fetch import cli_utils, filtering, lifecycle, merges, ndjson, resources, timing
 
 
 def export_url(fhir_url: str, group: str) -> str:
@@ -719,6 +719,7 @@ async def perform_bulk(
     filters: filtering.Filters,
     group: str,
     workdir: str,
+    managed_dir: str | None = None,
 ):
     os.makedirs(workdir, exist_ok=True)
     metadata = lifecycle.OutputMetadata(workdir)
@@ -747,5 +748,15 @@ async def perform_bulk(
             metadata=metadata,
         )
         await exporter.export()
+
+        if resources.PATIENT in res_types:
+            # Mark down which patients are new to this export, just in case the user later wants to
+            # do a crawl of some resources that weren't in this export. The server *should* be
+            # giving us all historical resources for new patients, if we exported that resource now.
+            # Also, ignore detected deleted patients, because the server should have told us those.
+            new, _deleted = merges.find_new_patients(workdir, managed_dir, filters)
+            if new:
+                metadata.note_new_patients(new)
+
         for res_type in res_types:
             metadata.mark_done(res_type, exporter.transaction_time)

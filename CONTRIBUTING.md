@@ -101,5 +101,5 @@ SMART Fetch can go back and use a previous transaction time as the new "since" d
 Bulk exports use a single date for the entire export.
 But crawls keep track of a unique transaction time per-resource.
 They do this because (a) they can and that gives us more flexibility but also
-(b) if one export is rarely created and the last one was created last month,
+(b) if one resource is rarely created and the last one was created last month,
 we don't want to end up using that one data as the "since" date for all the other resources.

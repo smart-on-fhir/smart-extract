@@ -2,6 +2,7 @@ import datetime
 import enum
 import json
 import os
+import re
 import sys
 
 import smart_fetch
@@ -158,6 +159,13 @@ class OutputMetadata(Metadata):
 
         return matches
 
+    def note_new_patients(self, patient_ids: set[str]) -> None:
+        self._contents["newPatients"] = sorted(patient_ids)
+        self._write()
+
+    def get_new_patients(self) -> set[str]:
+        return set(self._contents.get("newPatients", []))
+
     @staticmethod
     def _pretty_filters(filters: dict[str, list[str]]) -> str:
         lines = []
@@ -228,3 +236,21 @@ class ManagedMetadata(Metadata):
                 f"Target folder {os.path.basename(self._path)} is for a different Group.\n"
                 f"Expected {group}, but found {found_group}."
             )
+
+
+def list_workdirs(source_dir: str) -> dict[str, tuple[int, str]]:
+    """
+    Returns workdirs in reverse order (i.e. latest first)
+
+    Return format is filename -> (num, nickname) for filenames like {num}.{nickname}
+    """
+    try:
+        with os.scandir(source_dir) as scanner:
+            folders = [entry.name for entry in scanner if entry.is_dir()]
+    except FileNotFoundError:
+        return {}
+
+    matches = {re.fullmatch(r"(\d+)\.(.*)", folder): folder for folder in folders}
+    nums = {int(m.group(1)): (m.group(2), val) for m, val in matches.items() if m}
+
+    return {nums[num][1]: (num, nums[num][0]) for num in sorted(nums, reverse=True)}

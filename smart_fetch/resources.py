@@ -52,7 +52,7 @@ CREATED_SEARCH_FIELDS = {
     IMMUNIZATION: "date",  # clinical date, can't search on `recorded`
     MEDICATION_REQUEST: "authoredon",
     OBSERVATION: "date",  # clinical date, can't search on `issued`
-    # PATIENT has no admin date to search on
+    # PATIENT has no admin date to search on (which is sort of good - merges.py relies on it)
     PROCEDURE: "date",  # clinical date, has no admin date
     SERVICE_REQUEST: "authored",
 }

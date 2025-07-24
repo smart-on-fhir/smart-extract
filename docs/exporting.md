@@ -96,6 +96,25 @@ You can pass in `--mrn-system=uri:oid:1.2.3.4`
 and `--mrn-file=mrns.txt` (where that file contains a line of `abc`)
 to have SMART Fetch use a cohort that includes this patient.
 
+### New and Deleted Patients
+
+When crawling, SMART Fetch will notice new and deleted patients, just like a bulk export would.
+
+Meaning, historical resources for new and merged patients may be included in the crawl,
+even outside the `--since` timespan.
+New patients added to the Group or the MRN file will be noticed,
+as well as patient records that absorb another record when two patient records merge.
+In that case, we'll pull the historical resources for the surviving record,
+to make sure we have all the updated resources.
+
+And if a patient is deleted by the EHR (or removed from the Group or MRN file),
+that fact will be recorded in a `deleted/` folder, just like it would be for a bulk export.
+Downstream tooling might use that information.
+
+This all relies on looking back at previous exports in the export folder.
+Noticing new and deleted patients should automatically on the server side for a bulk export,
+but SMART Fetch has to do them manually for a crawl.
+
 ## Resuming
 
 If your bulk export (or crawl) gets interrupted, just run the SMART Fetch command again with the

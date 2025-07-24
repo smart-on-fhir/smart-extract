@@ -91,12 +91,14 @@ async def export_main(args: argparse.Namespace) -> None:
                 filters=filters,
                 group=args.group,
                 workdir=workdir,
+                managed_dir=source_dir,
             )
             await finish_resource(rest_client, workdir, filters.resources(), open_client=True)
         else:
             await crawl_utils.perform_crawl(
                 fhir_url=args.fhir_url,
                 filters=filters,
+                managed_dir=source_dir,
                 source_dir=source_dir,
                 workdir=workdir,
                 rest_client=rest_client,
@@ -136,7 +138,7 @@ def calculate_detailed_since(
         return None
 
     max_dones = {}  # the newest "done" value for each resource we're interested in
-    for folder in list_workdirs(source_dir):
+    for folder in lifecycle.list_workdirs(source_dir):
         metadata = lifecycle.OutputMetadata(os.path.join(source_dir, folder))
         matches = metadata.get_matching_timestamps(filters)
         for res_type, timestamp in matches.items():
@@ -164,7 +166,7 @@ def find_workdir(
 ) -> str:
     # First, scan the workdirs to find the highest num and see if there's an exact nickname match.
     highest_num = 0
-    for folder, (num, name) in list_workdirs(source_dir).items():
+    for folder, (num, name) in lifecycle.list_workdirs(source_dir).items():
         if not highest_num:
             highest_num = num
 
@@ -173,7 +175,7 @@ def find_workdir(
             return folder
 
     # Didn't find exact nickname match. Can we find the same context?
-    for folder in list_workdirs(source_dir):
+    for folder in lifecycle.list_workdirs(source_dir):
         metadata = lifecycle.OutputMetadata(os.path.join(source_dir, folder))
         if metadata.has_same_context(filters=filters):
             logging.warning(f"Re-using existing subfolder '{folder}' with similar arguments.")
@@ -187,24 +189,6 @@ def find_workdir(
     return folder
 
 
-def list_workdirs(source_dir: str) -> dict[str, tuple[int, str]]:
-    """
-    Returns workdirs in reverse order (i.e. latest first)
-
-    Return format is filename -> (num, nickname) for filenames like {num}.{nickname}
-    """
-    try:
-        with os.scandir(source_dir) as scanner:
-            folders = [entry.name for entry in scanner if entry.is_dir()]
-    except FileNotFoundError:
-        return {}
-
-    matches = {re.fullmatch(r"(\d+)\.(.*)", folder): folder for folder in folders}
-    nums = {int(m.group(1)): (m.group(2), val) for m, val in matches.items() if m}
-
-    return {nums[num][1]: (num, nums[num][0]) for num in sorted(nums, reverse=True)}
-
-
 async def finish_resource(
     client: cfs.FhirClient,
     workdir: str,
@@ -215,43 +199,44 @@ async def finish_resource(
     if isinstance(res_types, str):
         res_types = {res_types}
 
-    async def run_hydration_tasks():
-        first = True
-        done_types = set()
-        loop_types = res_types
-        while loop_types:
-            done_types |= loop_types
-            next_loop_types = set()
-            for task_name, task_info in tasks.all_tasks.items():
-                input_type, output_type, task_func = task_info
-                if input_type not in loop_types:
-                    continue
-
-                if first:
-                    rich.get_console().rule()
-                    first = False
-
-                # We don't provide a source_dir, because we want the hydration to only affect
-                # this most recent export subfolder, not other exports.
-                await task_func(client, workdir)
-
-                rich.get_console().rule()
-
-                if output_type not in done_types:
-                    # We wrote a new type out - we should iterate again to hydrate the new
-                    # resources, as needed
-                    next_loop_types.add(output_type)
-
-            loop_types = next_loop_types
-
     if open_client:
         async with client:
-            await run_hydration_tasks()
+            await run_hydration_tasks(client, workdir, res_types)
     else:
-        await run_hydration_tasks()
+        await run_hydration_tasks(client, workdir, res_types)
 
     for res_type in res_types:
         make_links(workdir, res_type)
+
+
+async def run_hydration_tasks(client: cfs.FhirClient, workdir: str, res_types: set[str]) -> None:
+    first = True
+    done_types = set()
+    loop_types = res_types
+    while loop_types:
+        done_types |= loop_types
+        next_loop_types = set()
+        for task_name, task_info in tasks.all_tasks.items():
+            input_type, output_type, task_func = task_info
+            if input_type not in loop_types:
+                continue
+
+            if first:
+                rich.get_console().rule()
+                first = False
+
+            # We don't provide a source_dir, because we want the hydration to only affect
+            # this most recent export subfolder, not other exports.
+            await task_func(client, workdir)
+
+            rich.get_console().rule()
+
+            if output_type not in done_types:
+                # We wrote a new type out - we should iterate again to hydrate the new
+                # resources, as needed
+                next_loop_types.add(output_type)
+
+        loop_types = next_loop_types
 
 
 def make_links(workdir: str, res_type: str) -> None:
